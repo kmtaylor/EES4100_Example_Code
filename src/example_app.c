@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <string.h>
+#include <pthread.h>
 
 struct list_object_s {
     char *string;                   /* 8 bytes */
@@ -11,10 +12,13 @@ struct list_object_s {
     struct list_object_s *next;     /* 8 bytes */
 };
 /* list_head is initialised to NULL on application launch as it is located in 
- * the .bss */
-struct list_object_s *list_head;
+ * the .bss. list_head must be accessed with list_lock held */
+static pthread_mutex_t list_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t list_data_ready = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t list_data_flush = PTHREAD_COND_INITIALIZER;
+static struct list_object_s *list_head;
 
-void add_to_list(char *input) {
+static void add_to_list(char *input) {
     /* Allocate memory */
     struct list_object_s *last_item;
     struct list_object_s *new_item = malloc(sizeof(struct list_object_s));
@@ -28,6 +32,9 @@ void add_to_list(char *input) {
     new_item->strlen = strlen(input);
     new_item->next = NULL;
 
+    /* list_head is shared between threads, need to lock before access */
+    pthread_mutex_lock(&list_lock);
+
     if (list_head == NULL) {
         /* Adding the first object */
         list_head = new_item;
@@ -37,27 +44,65 @@ void add_to_list(char *input) {
         while (last_item->next) last_item = last_item->next;
         last_item->next = new_item;
     }
+
+    /* Inform print_and_free that data is available */
+    pthread_cond_signal(&list_data_ready);
+    /* Release shared data lock */
+    pthread_mutex_unlock(&list_lock);
 }
 
-void print_and_free(void) {
-    struct list_object_s *old_object, *cur_object;
+static struct list_object_s *list_get_first(void) {
+    struct list_object_s *first_item;
 
-    cur_object = list_head;
+    first_item = list_head;
+    list_head = list_head->next;
 
-    do {
-        old_object = cur_object;
-        cur_object = cur_object->next;
-        printf("String is: %s\n", old_object->string);
-        printf("String length is %i\n", old_object->strlen);
-        free(old_object->string);
-        free(old_object);
-    } while (cur_object);
+    return first_item;
+}
+
+static void *print_and_free(void *arg) {
+    struct list_object_s *cur_object;
+
+    printf("thread is starting\n");
+
+    while (1) {
+        /* Wait until some data is available */
+        pthread_mutex_lock(&list_lock);
+
+        while (!list_head)
+            pthread_cond_wait(&list_data_ready, &list_lock);
+
+        cur_object = list_get_first();
+        /* Release lock, all further accesses are not shared */
+        pthread_mutex_unlock(&list_lock);
+
+
+        printf("t2: String is: %s\n", cur_object->string);
+        printf("t2: String length is %i\n", cur_object->strlen);
+        free(cur_object->string);
+        free(cur_object);
+
+        /* Inform list_flush that some work has been completed */
+        pthread_cond_signal(&list_data_flush);
+    }
+}
+
+static void list_flush(void) {
+    pthread_mutex_lock(&list_lock);
+
+    while (list_head) {
+        pthread_cond_signal(&list_data_flush);
+        pthread_cond_wait(&list_data_flush, &list_lock);
+    }
+
+    pthread_mutex_unlock(&list_lock);
 }
 
 int main(int argc, char **argv) {
     modbus_t *ctx;
     int option_index, c, counter, counter_given = 0;
     char input[256]; /* On the stack */
+    pthread_t print_thread;
 
     struct option long_options[] = {
         { "count",      required_argument,  0, 'c' },
@@ -82,6 +127,10 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Print out all items of linked list and free them */
+    /* Fork a new thread */
+    pthread_create(&print_thread, NULL, print_and_free, NULL);
+
     while (scanf("%256s", input) != EOF) {
         /* Add word to the bottom of a linked list */
         add_to_list(input);
@@ -91,11 +140,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Print out all items of linked list and free them */
-    print_and_free();
-
     printf("Linked list object is %li bytes long\n",
                     sizeof(struct list_object_s));
+
+    /* Block here until all objects have been printed */
+    list_flush();
 
     return 0;
 }

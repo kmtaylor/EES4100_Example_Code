@@ -12,6 +12,9 @@ LT_INIT
 # Dependencies go here
 AC_PROG_CC
 
+AC_SEARCH_LIBS([pthread_create], [pthread], [],
+    AC_MSG_ERROR([No pthreads implementation found]))
+
 PKG_CHECK_MODULES([MODBUS], [libmodbus])
 
 AC_CONFIG_FILES([
