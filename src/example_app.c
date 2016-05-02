@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/ip.h>
+#include <arpa/inet.h>
 
 #define SERVER_PORT 10000
 #define SERVER_ADDR "127.0.0.1"
@@ -145,6 +146,7 @@ static void server(void) {
             exit(EXIT_FAILURE);
         }
 
+        printf("Got data from %s\n", inet_ntoa(client_addr.sin_addr));
         add_to_list(data);
     }
 
